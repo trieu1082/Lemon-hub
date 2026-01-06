@@ -1,0 +1,168 @@
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local Debris = game:GetService("Debris")
+
+local SCALE      = 1.55    -- to hơn
+local EMIT_MULT  = 1.55    -- dày hơn
+local SPEED_MULT = 1.18
+local LIFE_MULT  = 1.15
+local LIGHT_MULT = 1.35
+
+local BEAM_W     = 1.45
+local TRAIL_W    = 1.35
+
+-- galaxy + lightning palette
+local PALETTE = {
+	Color3.fromRGB(135, 70, 255), -- tím
+	Color3.fromRGB(60, 160, 255), -- xanh
+	Color3.fromRGB(0, 255, 220),  -- cyan
+	Color3.fromRGB(255, 235, 120),-- vàng nhạt highlight
+	Color3.fromRGB(255, 255, 255) -- trắng
+}
+
+-- lightning burst (optional extra juice)
+local ENABLE_LIGHTNING_BURST = true
+local BURST_ARCS = 8
+local BURST_RADIUS = 5.5 * SCALE
+local BURST_HEIGHT = 3.0 * SCALE
+local BURST_LIFE = 0.30
+
+--========================
+-- HELPERS
+--========================
+local function safeSet(o,p,v) pcall(function() o[p] = v end) end
+
+local function makeSeq(colors)
+	local kp, n = {}, #colors
+	for i,c in ipairs(colors) do
+		kp[#kp+1] = ColorSequenceKeypoint.new((i-1)/(n-1), c)
+	end
+	return ColorSequence.new(kp)
+end
+
+local function scaleNumSeq(ns, mul)
+	if typeof(ns) ~= "NumberSequence" then return ns end
+	local kps = {}
+	for _,k in ipairs(ns.Keypoints) do
+		kps[#kps+1] = NumberSequenceKeypoint.new(k.Time, k.Value * mul, (k.Envelope or 0) * mul)
+	end
+	return NumberSequence.new(kps)
+end
+
+local GALAXY_SEQ = makeSeq(PALETTE)
+
+local function boost(inst)
+	if inst:IsA("ParticleEmitter") then
+		safeSet(inst, "Color", GALAXY_SEQ)
+		if inst.Size then safeSet(inst, "Size", scaleNumSeq(inst.Size, SCALE)) end
+		if inst.Rate then safeSet(inst, "Rate", inst.Rate * EMIT_MULT) end
+		if inst.Lifetime then safeSet(inst, "Lifetime", NumberRange.new(inst.Lifetime.Min * LIFE_MULT, inst.Lifetime.Max * LIFE_MULT)) end
+		if inst.Speed then safeSet(inst, "Speed", NumberRange.new(inst.Speed.Min * SPEED_MULT, inst.Speed.Max * SPEED_MULT)) end
+		if inst.LightEmission ~= nil then safeSet(inst, "LightEmission", math.clamp(inst.LightEmission * LIGHT_MULT, 0, 1)) end
+		if inst.LightInfluence ~= nil then safeSet(inst, "LightInfluence", math.clamp(inst.LightInfluence * 0.65, 0, 1)) end
+
+	elseif inst:IsA("Beam") then
+		safeSet(inst, "Color", GALAXY_SEQ)
+		if inst.Width0 then safeSet(inst, "Width0", inst.Width0 * BEAM_W) end
+		if inst.Width1 then safeSet(inst, "Width1", inst.Width1 * BEAM_W) end
+		if inst.LightEmission ~= nil then safeSet(inst, "LightEmission", math.clamp(inst.LightEmission * LIGHT_MULT, 0, 1)) end
+
+	elseif inst:IsA("Trail") then
+		safeSet(inst, "Color", GALAXY_SEQ)
+		if inst.WidthScale then safeSet(inst, "WidthScale", scaleNumSeq(inst.WidthScale, TRAIL_W)) end
+		if inst.LightEmission ~= nil then safeSet(inst, "LightEmission", math.clamp(inst.LightEmission * LIGHT_MULT, 0, 1)) end
+
+	elseif inst:IsA("PointLight") or inst:IsA("SpotLight") or inst:IsA("SurfaceLight") then
+		safeSet(inst, "Color", PALETTE[2])
+		safeSet(inst, "Brightness", (inst.Brightness or 1) * LIGHT_MULT)
+		safeSet(inst, "Range", (inst.Range or 8) * (SCALE * 1.05))
+
+	elseif inst:IsA("Texture") or inst:IsA("Decal") then
+		if inst.Color3 then safeSet(inst, "Color3", PALETTE[2]) end
+	end
+end
+
+local function walk(root)
+	if not root then return end
+	boost(root)
+	for _,d in ipairs(root:GetDescendants()) do
+		boost(d)
+	end
+end
+
+local function makeArc(folder, a, b)
+	local p0 = Instance.new("Part")
+	p0.Anchored, p0.CanCollide, p0.Transparency = true, false, 1
+	p0.Size = Vector3.new(0.2,0.2,0.2)
+	p0.CFrame = CFrame.new(a)
+	p0.Parent = folder
+
+	local p1 = p0:Clone()
+	p1.CFrame = CFrame.new(b)
+	p1.Parent = folder
+
+	local att0 = Instance.new("Attachment"); att0.Parent = p0
+	local att1 = Instance.new("Attachment"); att1.Parent = p1
+
+	local beam = Instance.new("Beam")
+	beam.Attachment0 = att0
+	beam.Attachment1 = att1
+	beam.Width0 = 0.24 * SCALE
+	beam.Width1 = 0.10 * SCALE
+	beam.FaceCamera = true
+	beam.LightEmission = 1
+	beam.Color = GALAXY_SEQ
+	beam.Parent = folder
+
+	local tw = TweenService:Create(beam, TweenInfo.new(BURST_LIFE, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Width0 = 0, Width1 = 0})
+	tw:Play()
+
+	Debris:AddItem(p0, BURST_LIFE + 0.15)
+	Debris:AddItem(p1, BURST_LIFE + 0.15)
+	Debris:AddItem(beam, BURST_LIFE + 0.15)
+end
+
+local function lightningBurst(pos)
+	local folder = Instance.new("Folder")
+	folder.Name = "CDK_FakeLightningBurst"
+	folder.Parent = workspace
+	Debris:AddItem(folder, 1.5)
+
+	for i=1, BURST_ARCS do
+		local ang = (math.pi * 2) * (i / BURST_ARCS)
+		local r = BURST_RADIUS * (0.75 + math.random(0,25)/100)
+		local a = pos + Vector3.new(math.cos(ang)*r, math.random(0, 18)/10 * SCALE, math.sin(ang)*r)
+		local b = pos + Vector3.new(math.random(-10,10)/10, BURST_HEIGHT * (0.75 + math.random(0,25)/100), math.random(-10,10)/10)
+		makeArc(folder, a, b)
+	end
+end
+
+local CDK
+pcall(function()
+	CDK = ReplicatedStorage:WaitForChild("Effect"):WaitForChild("Container"):WaitForChild("CursedDualKatana")
+end)
+
+if not CDK then
+	warn("loi.")
+	return
+end
+
+walk(CDK)
+
+ workspace, recolor + nổ lightning nhẹ
+workspace.DescendantAdded:Connect(function(obj)
+	local n = obj.Name:lower()
+	if n:find("cursed") or n:find("dual") or n:find("katana") or n:find("cdk") then
+		boost(obj)
+		if obj:IsA("Model") or obj:IsA("Folder") then
+			walk(obj)
+			if ENABLE_LIGHTNING_BURST then
+				local bp = obj:FindFirstChildWhichIsA("BasePart", true)
+				if bp then lightningBurst(bp.Position) end
+			end
+		end
+	end
+end)
+
+print("make by trieu")
